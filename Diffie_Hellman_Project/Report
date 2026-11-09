@@ -1,0 +1,66 @@
+# Project Report: Authenticated Diffie-Hellman Key Exchange
+
+## 1. How the Algorithms Work
+
+### Square-and-Multiply Exponentiation
+Trying to calculate large powers like $5^{15} \pmod{23}$ directly will crash or freeze a program because the raw numbers get way too big for memory. To fix this, I implemented binary square-and-multiply. 
+
+It looks at the binary bits of the exponent from right to left. On every loop iteration, it squares the base modulo $p$. If the current bit is 1 (odd), it also multiplies the running result by the base modulo $p$. This cuts the exponent in half each step, running in $O(\log e)$ time instead of multiplying linearly. I also added input checks so it rejects negative exponents, non-positive moduli, floats, and booleans.
+
+### Prime Generation and Checks
+For prime generation, I wrapped `Crypto.Util.number.getPrime` and fed it randomness from `secrets.token_bytes`. The function validates that the generated prime has the exact bit length requested, is odd, and passes `isPrime()`. 
+
+Whenever Bob receives a modulus $p$, he does not trust it blindly. He verifies that the bit length is strictly within the allowed 16 to 32-bit classroom range and calls `isPrime(p)` to make sure no composite numbers get through.
+
+### Factoring and Finding a Generator
+A generator $g$ has to produce every number in the multiplicative group modulo $p$, which has an order of $p - 1$. If $g$ generates a smaller subgroup, it is not a primitive root.
+
+To test this, my code factors $p - 1$ using trial division up to $\sqrt{p - 1}$ and keeps distinct prime factors. Then, it checks candidate numbers $g \in [2, p - 2]$. For each prime factor $r$ of $p - 1$, it checks if:
+$$g^{(p-1)/r} \pmod p == 1$$
+If the result is 1 for any factor, $g$ is rejected. The first candidate that never produces 1 across all factors is selected.
+
+---
+
+## 2. Worked Example (Classroom Fixture)
+
+Using the assignment test values ($p = 23, g = 5$, Alice $a = 6$, Bob $b = 15$):
+
+1. **Factoring $p - 1$:** 
+   $23 - 1 = 22$. Dividing out 2 leaves 11, giving prime factors $\{2, 11\}$.
+2. **Testing Generators:**
+   - Candidate $g = 2$: $2^{22/2} = 2^{11} \equiv 1 \pmod{23}$. It equals 1, so it is **rejected**.
+   - Candidate $g = 5$: $5^{11} \equiv 22 \pmod{23}$ and $5^2 \equiv 2 \pmod{23}$. Neither equals 1, so 5 is **accepted**.
+3. **Public Values:**
+   - Alice: $A = 5^6 \pmod{23} = 8$.
+   - Bob: $B = 5^{15} \pmod{23} = 19$.
+4. **Shared Secret:**
+   - Alice computes: $S_A = 19^6 \pmod{23} = 2$.
+   - Bob computes: $S_B = 8^{15} \pmod{23} = 2$.
+   Both match on $S = 2$ without ever exposing $a$ or $b$.
+
+---
+
+## 3. Trust Assumptions & Security Handling
+
+- **Trusted Long-Term Keys:** Alice and Bob are configured ahead of time with each other's trusted Ed25519 public keys.
+- **Transcript Binding:** Alice and Bob sign the entire sorted JSON transcript ($protocol, initiator, responder, p, g, A, B, nonce\_A, nonce\_B$). Signing the full session context prevents attackers from altering numbers unnoticed.
+- **Fresh Nonces:** Each side generates a fresh 32-byte hexadecimal nonce with `secrets.token_bytes(32)`. If an attacker tries to replay an old captured message, the session rejects it because the nonces do not match.
+- **Immediate Abort:** If a signature fails, a message is malformed, or parameters are out of range, the session immediately aborts, deletes temporary exponents, and wipes the secret.
+
+---
+
+## 4. Research: Finite-Field DH vs. Elliptic-Curve DH (ECDH)
+
+Finite-Field Diffie-Hellman (FFDH) relies on the Discrete Logarithm Problem in regular modular arithmetic: given $g^a \pmod p$, it is computationally difficult to figure out the exponent $a$. Elliptic-Curve Diffie-Hellman (ECDH) does the exact same conceptual exchange, but replaces modular exponentiation with scalar point multiplication on an elliptic curve ($Q = d \times G$, where $d$ is a private scalar and $G$ is a fixed base point on the curve).
+
+In this assignment, we used small 16 to 32-bit primes so we could quickly factor $p - 1$ and find a generator using basic trial division. In the real world, 16 to 32-bit primes are completely insecure; standard laptops can factor them or brute-force private keys in milliseconds. However, factoring $p - 1$ is also the main reason classical FFDH gets impractical: factoring a random 2048-bit number is impossible with current computing power, which forces real-world FFDH to rely on specialized safe primes ($p = 2q + 1$).
+
+This limitation explains why modern security standards transitioned to ECDH. Classical finite-field DH requires huge parameters (2048-bit or 3072-bit keys) because attacks like the General Number Field Sieve solve discrete logs in sub-exponential time. Elliptic curve math does not suffer from index-calculus shortcuts, meaning attacks take fully exponential time. Because of this, a 256-bit elliptic curve key (like X25519) provides roughly the same security as a bulky 3072-bit finite-field key while saving significant CPU time and bandwidth.
+
+Ephemeral ECDH (ECDHE) means both parties create fresh, single-use key pairs for every exchange. This provides forward secrecy: even if an attacker steals a server's long-term private signing key later on, they still cannot decrypt recorded past traffic because the ephemeral session keys were discarded immediately after use.
+
+However, ECDH alone does not provide authentication. An attacker sitting in the middle can still intercept and swap public curve points unnoticed. This is why real protocols (like TLS 1.3) combine ECDH key exchange with digital signatures (like Ed25519) to authenticate identity. Finally, real applications always use vetted libraries and standardized curves rather than custom code to prevent subtle vulnerabilities like invalid-curve attacks and timing side channels.
+
+### References
+1. Diffie, W., & Hellman, M. (1976). *New Directions in Cryptography*. IEEE Transactions on Information Theory.
+2. Langley, A., Hamburg, M., & Turner, S. (2016). *RFC 7748: Elliptic Curves for Security*. Internet Engineering Task Force.
